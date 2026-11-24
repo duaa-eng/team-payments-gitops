@@ -1,5 +1,4 @@
-# Optional Live GKE Cluster Manifest (Scaled down so it runs on any small GKE cluster!)
-# Deploy from your own macOS Terminal via: ./scripts/deploy_live_gke.sh <GCP_PROJECT_ID> <CLUSTER_NAME> <LOCATION>
+# Live GKE Autopilot Demo Manifest (Argolis-Safe, Real Block Disk Page Cache + Real Exit 137 OOM!)
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -7,13 +6,28 @@ metadata:
   labels:
     fleet.gke.io/fleet-scope: team-payments
 ---
-# 1. Healthy cache pod filling reclaimable Linux page cache (/tmp file reads) with low active heap
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ledger-cache-pvc
+  namespace: payments-prod
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: standard-rwo
+  resources:
+    requests:
+      storage: 1Gi
+---
+# 1. Suspect A (Red Herring): Reads a 430 MiB file on real ext4 PVC -> high usage_bytes (page cache), tiny working_set_bytes!
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: ledger-cache
   namespace: payments-prod
 spec:
+  strategy:
+    type: Recreate
   replicas: 1
   selector:
     matchLabels:
@@ -25,28 +39,46 @@ spec:
     spec:
       containers:
         - name: ledger-cache
-          image: python:3.12-slim
+          image: mirror.gcr.io/library/python:3.12-slim
           command: ["python3", "-u", "-c"]
           args:
             - |
-              import time
-              print("INFO [ledger-cache]Read-through settlement ledger cache healthy; warming OS page cache...")
-              with open("/tmp/ledger_pagecache.bin", "wb") as f:
-                  f.write(b"0" * (180 * 1024 * 1024))
+              import os, time
+              path = "/cache/ledger_blocks.bin"
+              print("INFO [ledger-cache] Preparing 420MiB settlement file on persistent ext4 volume...")
+              chunk = b"L" * (4 * 1024 * 1024)
+              with open(path, "wb") as f:
+                  for _ in range(105):
+                      f.write(chunk)
+                  f.flush()
+                  os.fsync(f.fileno())
+                  if hasattr(os, "posix_fadvise"):
+                      os.posix_fadvise(f.fileno(), 0, 0, os.POSIX_FADV_DONTNEED)
+              # Single sequential read places all 420MiB into inactive_file (reclaimable/evictable Linux page cache!)
+              with open(path, "rb") as f:
+                  while f.read(4 * 1024 * 1024):
+                      pass
               while True:
-                  with open("/tmp/ledger_pagecache.bin", "rb") as f:
-                      _ = f.read(16 * 1024 * 1024)
-                  print("INFO [ledger-cache] Checkpoint complete. Active working_set low; OS file page-cache warm.")
-                  time.sleep(20)
+                  print("INFO [ledger-cache] Healthy! Active working_set=~28MiB (5.5%); reclaimable Linux ext4 page-cache=~420MiB (total usage ~88%). 0 restarts.")
+                  time.sleep(25)
           resources:
             requests:
-              cpu: "100m"
-              memory: "256Mi"
+              cpu: "250m"
+              memory: "512Mi"
+              ephemeral-storage: "512Mi"
             limits:
-              cpu: "200m"
-              memory: "256Mi"
+              cpu: "250m"
+              memory: "512Mi"
+              ephemeral-storage: "512Mi"
+          volumeMounts:
+            - name: cache-vol
+              mountPath: /cache
+      volumes:
+        - name: cache-vol
+          persistentVolumeClaim:
+            claimName: ledger-cache-pvc
 ---
-# 2. Crashing worker pod intentionally exceeding its cgroup memory ceiling -> real OOMKilled (Exit Code 137)!
+# 2. Suspect B (Real Fire!): Climbs steadily over ~70s so GMP scrapes rising working_set_bytes >85% -> OOMKilled (Exit 137)!
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -64,23 +96,27 @@ spec:
     spec:
       containers:
         - name: payments-worker
-          image: python:3.12-slim
+          image: mirror.gcr.io/library/python:3.12-slim
           command: ["python3", "-u", "-c"]
           args:
             - |
               import time
-              print("INFO [payments-worker] Processing SEPA Instant Settlement batch #88412...")
-              time.sleep(2)
-              print("WARN [payments-worker] Active working_set_bytes crossed 85% of memory limit! Major page faults rising...")
+              print("INFO [payments-worker] Processing EU SEPA Instant Settlement batch #88412 (280,000 records)...")
               buf = []
-              # Allocate anonymous un-evictable heap past 128Mi limit -> triggers real Linux OOMKilled (Exit 137)
-              for i in range(40):
+              for step in range(1, 80):
                   buf.append(bytearray(8 * 1024 * 1024))
-                  time.sleep(0.2)
+                  mib = step * 8
+                  if mib == 440:
+                      print("WARN [payments-worker] PRECURSOR: working_set_bytes exceeded 85% (440MiB / 512MiB)! Major page faults rising...")
+                  elif mib == 496:
+                      print("ERROR [payments-worker] Approaching 512MiB cgroup memory.max ceiling—kernel OOM-killer imminent (Exit Code 137)!")
+                  time.sleep(1.1)
           resources:
             requests:
-              cpu: "100m"
-              memory: "128Mi"
+              cpu: "250m"
+              memory: "512Mi"
+              ephemeral-storage: "512Mi"
             limits:
-              cpu: "200m"
-              memory: "128Mi"
+              cpu: "250m"
+              memory: "512Mi"
+              ephemeral-storage: "512Mi"

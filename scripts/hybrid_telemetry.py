@@ -44,7 +44,7 @@ def iso_minutes_ago(mins: int) -> str:
     return ts.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def try_live_kubectl(args: list[str], timeout: int = 6) -> str | None:
+def try_live_kubectl(args: list[str], timeout: int = 20) -> str | None:
     kubectl = KUBECTL_BIN if os.path.exists(KUBECTL_BIN) else "kubectl"
     try:
         res = subprocess.run(
@@ -59,45 +59,151 @@ def try_live_kubectl(args: list[str], timeout: int = 6) -> str | None:
         return None
 
 
+def _run_gmp_instant(project_id: str, token: str, promql: str) -> list[dict]:
+    curl_res = subprocess.run(
+        [
+            "/usr/bin/curl",
+            "-sS",
+            "-G",
+            "-H",
+            f"Authorization: Bearer {token}",
+            "--data-urlencode",
+            f"query={promql}",
+            f"https://monitoring.googleapis.com/v1/projects/{project_id}/location/global/prometheus/api/v1/query",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=15,
+        check=True,
+    )
+    payload = json.loads(curl_res.stdout)
+    if payload.get("status") == "success":
+        return payload.get("data", {}).get("result", [])
+    return []
+
+
 def try_live_promql(project_id: str, query: str) -> dict | None:
     gcloud = GCLOUD_BIN if os.path.exists(GCLOUD_BIN) else "gcloud"
     try:
         tok_res = subprocess.run(
-            [gcloud, "auth", "print-access-token"],
+            [gcloud, "auth", "application-default", "print-access-token", "--quiet"],
             capture_output=True,
             text=True,
-            timeout=5,
+            timeout=15,
             check=True,
         )
         token = tok_res.stdout.strip()
-        params = urllib.parse.urlencode({"query": query})
-        url = (
-            f"https://monitoring.googleapis.com/v1/projects/{project_id}"
-            f"/location/global/prometheus/api/v1/query?{params}"
+        user_series = _run_gmp_instant(project_id, token, query)
+        ws_series = _run_gmp_instant(
+            project_id,
+            token,
+            'container_memory_working_set_bytes{namespace="payments-prod",container!=""}',
         )
-        req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
-        with urllib.request.urlopen(req, timeout=6) as resp:
-            payload = json.loads(resp.read().decode("utf-8"))
-            if payload.get("status") == "success" and payload.get("data", {}).get("result"):
-                return payload
+        used_breakdown = _run_gmp_instant(
+            project_id,
+            token,
+            'kubernetes_io:container_memory_used_bytes{namespace_name="payments-prod"}',
+        )
+        limits_series = _run_gmp_instant(
+            project_id,
+            token,
+            'kubernetes_io:container_memory_limit_bytes{namespace_name="payments-prod"}',
+        )
+        if ws_series or used_breakdown or user_series:
+            parsed_breakdown = []
+            for item in used_breakdown:
+                m = item.get("metric", {})
+                val_bytes = float(item.get("value", [0, "0"])[1])
+                parsed_breakdown.append(
+                    {
+                        "pod": m.get("pod_name"),
+                        "container": m.get("container_name"),
+                        "memory_type": m.get("memory_type"),
+                        "mib": round(val_bytes / (1024 * 1024), 2),
+                    }
+                )
+            parsed_limits = {
+                item.get("metric", {}).get("pod_name"): round(
+                    float(item.get("value", [0, "0"])[1]) / (1024 * 1024), 2
+                )
+                for item in limits_series
+            }
+            return {
+                "source": "LIVE_GOOGLE_MANAGED_PROMETHEUS",
+                "project": project_id,
+                "executedPromQL": query,
+                "liveAutopilotLimitsMiB": parsed_limits,
+                "liveMemoryBreakdownMiB": parsed_breakdown,
+                "rawWorkingSetSeries": ws_series,
+                "rawUserQueryResult": user_series,
+                "gitopsOverlayContext": (
+                    "Note: Local GitOps repo models production sizing (overlays/gke-cloud=6Gi healthy vs overlays/gdc-onprem=4Gi drifted OOM)."
+                ),
+            }
     except Exception:
         return None
     return None
 
 
+def try_live_cloud_logging(project_id: str, cluster_name: str, namespace: str, container_name: str) -> list[str] | None:
+    gcloud = GCLOUD_BIN if os.path.exists(GCLOUD_BIN) else "gcloud"
+    log_filter = (
+        f'resource.type="k8s_container" '
+        f'AND resource.labels.cluster_name="{cluster_name}" '
+        f'AND resource.labels.namespace_name="{namespace}" '
+        f'AND resource.labels.container_name="{container_name}"'
+    )
+    try:
+        res = subprocess.run(
+            [
+                gcloud,
+                "logging",
+                "read",
+                log_filter,
+                f"--project={project_id}",
+                "--limit=15",
+                "--format=value(timestamp,textPayload)",
+                "--quiet",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=20,
+            check=True,
+        )
+        lines = [ln.strip() for ln in reversed(res.stdout.strip().splitlines()) if ln.strip()]
+        return lines if lines else None
+    except Exception:
+        return None
+
+
 def list_k8s_events(cluster: str = "gdc-bm-fra1", namespace: str = "payments-prod") -> dict:
     cfg = load_demo_config()
     if cfg.get("mode") == "live":
-        raw = try_live_kubectl(["get", "events", "-n", namespace, "-o", "json"])
-        if raw:
-            parsed = json.loads(raw)
+        raw_ev = try_live_kubectl(["get", "events", "-n", namespace, "-o", "json"])
+        raw_pods = try_live_kubectl(["get", "pods", "-n", namespace, "-o", "json"])
+        if raw_ev:
+            parsed = json.loads(raw_ev)
             items = parsed.get("items", [])
-            if items:
+            pod_summaries = []
+            if raw_pods:
+                for p in json.loads(raw_pods).get("items", []):
+                    cs = (p.get("status", {}).get("containerStatuses") or [{}])[0]
+                    pod_summaries.append(
+                        {
+                            "pod": p.get("metadata", {}).get("name"),
+                            "phase": p.get("status", {}).get("phase"),
+                            "restartCount": cs.get("restartCount", 0),
+                            "currentState": cs.get("state"),
+                            "lastTerminatedState": cs.get("lastState", {}).get("terminated"),
+                        }
+                    )
+            if items or pod_summaries:
                 return {
                     "source": "LIVE_GKE_API",
+                    "project": cfg.get("project_id"),
                     "cluster": cfg.get("cluster", cluster),
                     "namespace": namespace,
-                    "event_count": len(items),
+                    "livePodStatuses": pod_summaries,
                     "events": [
                         {
                             "lastTimestamp": e.get("lastTimestamp") or e.get("eventTime"),
@@ -195,15 +301,31 @@ def get_pod_logs(
         if previous:
             cmd.append("--previous")
         raw = try_live_kubectl(cmd)
-        if raw:
+        if raw and "unable to retrieve container logs" not in raw:
             return {
-                "source": "LIVE_GKE_LOGS",
+                "source": "LIVE_GKE_KUBECTL_LOGS",
                 "cluster": cfg.get("cluster", cluster),
                 "namespace": namespace,
                 "pod": pod,
                 "previous": previous,
                 "logs": raw.splitlines(),
             }
+        if cfg.get("project_id") and cfg.get("cluster"):
+            cl_lines = try_live_cloud_logging(
+                project_id=cfg["project_id"],
+                cluster_name=cfg["cluster"],
+                namespace=namespace,
+                container_name=label,
+            )
+            if cl_lines:
+                return {
+                    "source": "LIVE_GOOGLE_CLOUD_LOGGING",
+                    "project": cfg["project_id"],
+                    "cluster": cfg["cluster"],
+                    "namespace": namespace,
+                    "container": label,
+                    "logs": cl_lines,
+                }
 
     if "ledger" in pod:
         return {
@@ -267,12 +389,7 @@ def query_promql(query: str, cluster: str = "all", window: str = "30m") -> dict:
     if cfg.get("mode") == "live" and cfg.get("project_id"):
         live_data = try_live_promql(cfg["project_id"], query)
         if live_data:
-            return {
-                "source": "LIVE_GOOGLE_MANAGED_PROMETHEUS",
-                "project": cfg["project_id"],
-                "query": query,
-                "result": live_data["data"]["result"],
-            }
+            return live_data
 
     q_lower = query.lower()
     timestamps = [iso_minutes_ago(m) for m in [30, 25, 20, 15, 10, 5, 1]]
