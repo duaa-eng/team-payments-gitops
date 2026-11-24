@@ -1,0 +1,62 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: payments-worker
+  namespace: payments-prod
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+    argocd.argoproj.io/sync-options: Prune=false
+  labels:
+    app: payments-worker
+    fleet.gke.io/fleet-scope: team-payments
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: payments-worker
+  template:
+    metadata:
+      labels:
+        app: payments-worker
+        fleet.gke.io/fleet-scope: team-payments
+    spec:
+      serviceAccountName: payments-worker-sa
+      priorityClassName: tier1-mission-critical
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app: payments-worker
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        fsGroup: 10001
+      containers:
+        - name: payments-worker
+          image: europe-west3-docker.pkg.dev/prod-fleet-host/payments/settlement-worker:v2.14.0
+          ports:
+            - name: http-metrics
+              containerPort: 9090
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+          resources:
+            requests:
+              cpu: "2"
+              memory: "4Gi"
+            limits:
+              cpu: "2"
+              memory: "4Gi"
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: payments-worker-pdb
+  namespace: payments-prod
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: payments-worker

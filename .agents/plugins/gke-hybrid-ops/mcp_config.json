@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "gke-hybrid-mcp": {
+      "command": "/usr/local/bin/python3",
+      "args": [
+        "/Users/duaahassan/Downloads/day3-antigravity-gke-demo/scripts/mcp_gke_observability.py"
+      ]
+    }
+  }
+}

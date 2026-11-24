@@ -1,0 +1,19 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: payments-worker
+  namespace: payments-prod
+spec:
+  template:
+    spec:
+      nodeSelector:
+        cloud.google.com/compute-class: tier1-ha
+      containers:
+        - name: payments-worker
+          resources:
+            requests:
+              cpu: "2"
+              memory: "6Gi"
+            limits:
+              cpu: "2"
+              memory: "6Gi"

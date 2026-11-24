@@ -1,0 +1,18 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: payments-worker
+  namespace: payments-prod
+spec:
+  template:
+    spec:
+      containers:
+        - name: payments-worker
+          resources:
+            # BUG: Left at 4Gi while gke-cloud was bumped to 6Gi (VPA target: 6Gi)
+            requests:
+              cpu: "2"
+              memory: "4Gi"
+            limits:
+              cpu: "2"
+              memory: "4Gi"

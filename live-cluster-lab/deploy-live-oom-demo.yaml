@@ -1,0 +1,86 @@
+# Optional Live GKE Cluster Manifest (Scaled down so it runs on any small GKE cluster!)
+# Deploy from your own macOS Terminal via: ./scripts/deploy_live_gke.sh <GCP_PROJECT_ID> <CLUSTER_NAME> <LOCATION>
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: payments-prod
+  labels:
+    fleet.gke.io/fleet-scope: team-payments
+---
+# 1. Healthy cache pod filling reclaimable Linux page cache (/tmp file reads) with low active heap
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ledger-cache
+  namespace: payments-prod
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ledger-cache
+  template:
+    metadata:
+      labels:
+        app: ledger-cache
+    spec:
+      containers:
+        - name: ledger-cache
+          image: python:3.12-slim
+          command: ["python3", "-u", "-c"]
+          args:
+            - |
+              import time
+              print("INFO [ledger-cache]Read-through settlement ledger cache healthy; warming OS page cache...")
+              with open("/tmp/ledger_pagecache.bin", "wb") as f:
+                  f.write(b"0" * (180 * 1024 * 1024))
+              while True:
+                  with open("/tmp/ledger_pagecache.bin", "rb") as f:
+                      _ = f.read(16 * 1024 * 1024)
+                  print("INFO [ledger-cache] Checkpoint complete. Active working_set low; OS file page-cache warm.")
+                  time.sleep(20)
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "200m"
+              memory: "256Mi"
+---
+# 2. Crashing worker pod intentionally exceeding its cgroup memory ceiling -> real OOMKilled (Exit Code 137)!
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: payments-worker
+  namespace: payments-prod
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: payments-worker
+  template:
+    metadata:
+      labels:
+        app: payments-worker
+    spec:
+      containers:
+        - name: payments-worker
+          image: python:3.12-slim
+          command: ["python3", "-u", "-c"]
+          args:
+            - |
+              import time
+              print("INFO [payments-worker] Processing SEPA Instant Settlement batch #88412...")
+              time.sleep(2)
+              print("WARN [payments-worker] Active working_set_bytes crossed 85% of memory limit! Major page faults rising...")
+              buf = []
+              # Allocate anonymous un-evictable heap past 128Mi limit -> triggers real Linux OOMKilled (Exit 137)
+              for i in range(40):
+                  buf.append(bytearray(8 * 1024 * 1024))
+                  time.sleep(0.2)
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "200m"
+              memory: "128Mi"

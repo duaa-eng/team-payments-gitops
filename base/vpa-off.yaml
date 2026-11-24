@@ -1,0 +1,13 @@
+apiVersion: autoscaling.k8s.io/v1
+kind: VerticalPodAutoscaler
+metadata:
+  name: payments-worker-vpa
+  namespace: payments-prod
+spec:
+  targetRef:
+    apiVersion: "apps/v1"
+    kind: Deployment
+    name: payments-worker
+  updatePolicy:
+    # Day 3 Golden Rule: Compute right-sizing targets without evicting prod pods!
+    updateMode: "Off"

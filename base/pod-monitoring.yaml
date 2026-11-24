@@ -1,0 +1,18 @@
+apiVersion: monitoring.googleapis.com/v1
+kind: PodMonitoring
+metadata:
+  name: payments-prod-scraping
+  namespace: payments-prod
+spec:
+  selector:
+    matchExpressions:
+      - key: app
+        operator: In
+        values: ["payments-worker", "ledger-cache"]
+  endpoints:
+    - port: http-metrics
+      interval: 30s
+      path: /metrics
+      metricRelabeling:
+        - action: labeldrop
+          regex: "(transaction_id|request_id|user_id)"
