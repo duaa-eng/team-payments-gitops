@@ -6,9 +6,13 @@ real Pull Request against `main` via the GitHub REST API (never exposing credent
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 def get_current_branch() -> str:
@@ -31,6 +35,7 @@ def redact(text: str) -> str:
 
 
 def main() -> None:
+    os.chdir(REPO_ROOT)
     parser = argparse.ArgumentParser(description="Push fix branch and open GitHub PR")
     parser.add_argument("--title", default="fix(gdc-onprem): right-size payments-worker to 6Gi & add GMP Pre-OOM rule")
     parser.add_argument(
@@ -117,6 +122,25 @@ def main() -> None:
             resp = json.loads(curl_res.stdout)
             if resp.get("html_url"):
                 print(f"[PASS] Created GitHub Pull Request #{resp.get('number')}: {resp['html_url']}")
+                return
+            # If an open PR already exists for this branch, look it up and return its URL
+            list_res = subprocess.run(
+                [
+                    "/usr/bin/curl",
+                    "-sS",
+                    "-H",
+                    "Accept: application/vnd.github+json",
+                    "-H",
+                    f"Authorization: Bearer {token}",
+                    f"https://api.github.com/repos/{owner}/{repo}/pulls?head={owner}:{branch}&state=open",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+            open_prs = json.loads(list_res.stdout)
+            if isinstance(open_prs, list) and open_prs and open_prs[0].get("html_url"):
+                print(f"[PASS] Updated GitHub Pull Request #{open_prs[0].get('number')}: {open_prs[0]['html_url']}")
                 return
         except Exception:
             pass
