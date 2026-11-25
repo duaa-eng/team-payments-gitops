@@ -1,0 +1,24 @@
+apiVersion: monitoring.googleapis.com/v1
+kind: Rules
+metadata:
+  name: payments-oom-precursor-rules
+  namespace: payments-prod
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+    argocd.argoproj.io/sync-options: Prune=false
+  labels:
+    fleet.gke.io/fleet-scope: team-payments
+spec:
+  groups:
+    - name: oom-precursor-alerts
+      interval: 30s
+      rules:
+        - alert: PaymentsContainerWorkingSetHigh
+          expr: container_memory_working_set_bytes{container!=""} / kube_pod_container_resource_limits{resource="memory"} > 0.85
+          for: 5m
+          labels:
+            severity: critical
+            fleet_scope: team-payments
+          annotations:
+            summary: "Container working_set_bytes > 85% of memory limit in payments-prod"
+            description: "Active non-reclaimable working set exceeded 85% of cgroup memory limit for 5m (Pre-OOMKilled Exit 137 precursor)."
