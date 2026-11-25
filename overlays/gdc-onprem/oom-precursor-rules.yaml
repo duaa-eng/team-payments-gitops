@@ -14,7 +14,17 @@ spec:
       interval: 30s
       rules:
         - alert: PaymentsContainerWorkingSetHigh
-          expr: container_memory_working_set_bytes{container!=""} / kube_pod_container_resource_limits{resource="memory"} > 0.85
+          expr: |
+            (
+              max by (project_id, location, cluster, namespace, pod, container) (
+                container_memory_working_set_bytes{namespace="payments-prod", container!="", container!="POD"}
+              )
+              /
+              on (project_id, location, cluster, namespace, pod, container)
+              max by (project_id, location, cluster, namespace, pod, container) (
+                kube_pod_container_resource_limits{namespace="payments-prod", container!="", resource="memory"} > 0
+              )
+            ) > 0.85
           for: 5m
           labels:
             severity: critical
