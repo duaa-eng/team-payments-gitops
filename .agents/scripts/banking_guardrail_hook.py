@@ -34,6 +34,9 @@ SAFE_LOCAL_PREFIXES = (
     "git add",
     "git commit",
     "git log",
+    "python3 scripts/create_github_pr.py",
+    "python3 ./scripts/create_github_pr.py",
+    "./scripts/create_github_pr.py",
 )
 
 
