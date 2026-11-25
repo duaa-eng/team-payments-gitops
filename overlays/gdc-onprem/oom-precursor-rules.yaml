@@ -1,0 +1,24 @@
+apiVersion: monitoring.googleapis.com/v1
+kind: Rules
+metadata:
+  name: payments-prod-oom-precursors
+  namespace: payments-prod
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+    argocd.argoproj.io/sync-options: Prune=false
+spec:
+  groups:
+    - name: memory-precursor-signals
+      interval: 30s
+      rules:
+        - alert: ContainerWorkingSetApproachingLimit
+          expr: |
+            container_memory_working_set_bytes{namespace="payments-prod", container!=""}
+              / kube_pod_container_resource_limits{namespace="payments-prod", resource="memory"} > 0.85
+          for: 5m
+          labels:
+            severity: warning
+            fleet_scope: team-payments
+          annotations:
+            summary: "Pre-OOMKilled Alert: Active working_set_bytes > 85% of memory limit"
+            description: "Excludes reclaimable Linux disk page cache. Investigate heap growth before Exit Code 137 strikes."

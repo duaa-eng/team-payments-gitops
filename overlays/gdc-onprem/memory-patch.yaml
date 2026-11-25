@@ -9,10 +9,10 @@ spec:
       containers:
         - name: payments-worker
           resources:
-            # BUG: Left at 4Gi while gke-cloud was bumped to 6Gi (VPA target: 6Gi)
+            # Aligned with gke-cloud & VPA 'Off' 30-day target (6Gi Guaranteed QoS)
             requests:
               cpu: "2"
-              memory: "4Gi"
+              memory: "6Gi"
             limits:
               cpu: "2"
-              memory: "4Gi"
+              memory: "6Gi"
